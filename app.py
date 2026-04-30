@@ -1,0 +1,167 @@
+import os
+import tempfile
+
+import streamlit as st
+from dotenv import load_dotenv
+from anthropic import Anthropic
+
+from src.extractor import DEFAULT_MODEL, extract_candidate
+from src.models import ProcessingError, ScoredCandidate
+from src.pdf_parser import parse_pdf
+from src.scorer import score_candidate
+from src.critique import critique_and_maybe_revise
+
+load_dotenv()
+
+Result = ScoredCandidate | ProcessingError
+
+
+def process_one(client, pdf_path, filename, jd_text, model, self_critique):
+    """Run one resume through parse -> extract -> score (-> critique)."""
+
+    # 1. Parse the PDF
+    try:
+        resume_text = parse_pdf(pdf_path)
+    except Exception as e:
+        return ProcessingError(source_file=filename, stage="parse", message=str(e))
+
+    # 2. Extract candidate info
+    try:
+        profile = extract_candidate(client, resume_text, model=model)
+    except Exception as e:
+        return ProcessingError(source_file=filename, stage="extract", message=str(e))
+
+    # 2. Score against the JD
+    try:
+        scored = score_candidate(client, profile, jd_text, filename, model=model)
+    except Exception as e:
+        return ProcessingError(source_file=filename, stage="score", message=str(e))
+
+    # 3. Optional self-critique
+    if self_critique:
+        try:
+            scored = critique_and_maybe_revise(client, scored, jd_text, model=model)
+        except Exception:
+            pass  # keep original scores if critique fails
+
+    return scored
+
+
+# ── Page config ──
+st.set_page_config(page_title="Resume Matcher", layout="wide")
+st.title("Resume Matcher")
+st.write("Upload a job description and resumes to score candidates.")
+
+# ── Sidebar: settings ──
+with st.sidebar:
+    st.header("Settings")
+    model = st.text_input("Claude model", value=DEFAULT_MODEL)
+    self_critique = st.checkbox("Enable self-critique (extra LLM call per resume)")
+
+# ── File uploads ──
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("Job Description")
+    jd_file = st.file_uploader("Upload JD (TXT)", type=["txt"])
+
+with col2:
+    st.subheader("Resumes")
+    resume_files = st.file_uploader(
+        "Upload resumes (PDF)", type=["pdf"], accept_multiple_files=True
+    )
+
+# ── Run button ──
+if st.button("Match Resumes", type="primary"):
+    # Validate inputs
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        st.error("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+        st.stop()
+
+    if not jd_file:
+        st.error("Please upload a job description PDF.")
+        st.stop()
+
+    if not resume_files:
+        st.error("Please upload at least one resume PDF.")
+        st.stop()
+
+    # Read the JD text file
+    jd_text = jd_file.read().decode("utf-8")
+
+    # Show the parsed JD
+    with st.expander("Parsed Job Description"):
+        st.text(jd_text)
+
+    # Process each resume
+    client = Anthropic()
+    results = []
+    progress = st.progress(0, text="Processing resumes...")
+
+    for i, resume_file in enumerate(resume_files):
+        progress.progress(
+            i / len(resume_files),
+            text=f"Processing {resume_file.name} ({i + 1}/{len(resume_files)})...",
+        )
+
+        # Save uploaded PDF to a temp file so pdfplumber can read it
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(resume_file.read())
+            tmp_path = tmp.name
+
+        result = process_one(client, tmp_path, resume_file.name, jd_text, model, self_critique)
+        os.unlink(tmp_path)
+        results.append(result)
+
+    progress.progress(1.0, text="Done!")
+
+    # ── Split results into scored candidates and errors ──
+    scored = [r for r in results if isinstance(r, ScoredCandidate)]
+    errors = [r for r in results if isinstance(r, ProcessingError)]
+
+    # Sort by overall score, highest first
+    scored.sort(key=lambda c: c.overall_fit.score, reverse=True)
+
+    # ── Display ranked candidates ──
+    if scored:
+        st.subheader("Ranked Candidates")
+
+        # Summary table
+        table_data = []
+        for rank, c in enumerate(scored, 1):
+            table_data.append({
+                "Rank": rank,
+                "Candidate": c.profile.name,
+                "Overall": c.overall_fit.score,
+                "Skills": c.skills_match.score,
+                "Experience": c.experience_match.score,
+                "Role Relevance": c.role_relevance.score,
+            })
+        st.table(table_data)
+
+        # Detailed view for each candidate
+        for c in scored:
+            with st.expander(f"{c.profile.name} — {c.overall_fit.score}/100"):
+                st.write(f"**Source:** {c.source_file}")
+                st.write(f"**Years of experience:** {c.profile.years_experience}")
+                st.write(f"**Skills:** {', '.join(c.profile.skills)}")
+
+                st.write("---")
+                st.write(f"**Overall reasoning:** {c.reasoning}")
+
+                st.write("**Scores:**")
+                st.write(f"- Skills match ({c.skills_match.score}): {c.skills_match.reasoning}")
+                st.write(f"- Experience match ({c.experience_match.score}): {c.experience_match.reasoning}")
+                st.write(f"- Role relevance ({c.role_relevance.score}): {c.role_relevance.reasoning}")
+                st.write(f"- Overall fit ({c.overall_fit.score}): {c.overall_fit.reasoning}")
+
+                if c.gaps:
+                    st.write("**Gaps:**")
+                    for gap in c.gaps:
+                        st.write(f"- _{gap.category}_: {gap.detail}")
+
+    # ── Display errors ──
+    if errors:
+        st.subheader("Errors")
+        for e in errors:
+            st.error(f"**{e.source_file}** failed at `{e.stage}`: {e.message}")

@@ -1,0 +1,39 @@
+Senior Backend Engineer — Payments Platform
+
+About the role
+--------------
+We're hiring a senior backend engineer to join our payments platform team.
+You'll own service design and implementation for core payment flows (auth,
+capture, refund, reconciliation) used by thousands of merchants, and work
+closely with our risk, ledger, and integrations teams.
+
+Required
+--------
+- 5+ years of professional backend engineering experience, ideally building
+  transactional systems (payments, banking, ledger, billing, or similar).
+- Strong Python OR Go in production. Comfortable designing, reviewing, and
+  operating services written in your primary language.
+- Solid working knowledge of PostgreSQL: schema design, indexes, transaction
+  isolation, query tuning.
+- Experience building and maintaining REST or gRPC APIs that other teams
+  depend on.
+- Production operational maturity: you've owned services, run incidents, and
+  written postmortems.
+- Familiar with distributed-systems fundamentals: idempotency, retries,
+  at-least-once delivery, eventual consistency, circuit breakers.
+
+Nice to have
+------------
+- Direct experience with payment rails (Stripe, Adyen, ACH, card networks).
+- Event streaming (Kafka, Kinesis, Pub/Sub).
+- Kubernetes, Terraform, and general infrastructure-as-code comfort.
+- Exposure to compliance regimes (PCI DSS, SOC 2).
+- Experience mentoring mid-level engineers.
+
+You will
+--------
+- Design and implement new payment flows end-to-end, from schema to API to
+  rollout.
+- Improve observability, reliability, and cost of the existing platform.
+- Participate in on-call rotation (roughly one week every six).
+- Raise the quality bar through code review, design review, and mentorship.
