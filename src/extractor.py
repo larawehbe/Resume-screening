@@ -1,13 +1,21 @@
 """
-First LLM call: turn raw resume text into a CandidateProfile.
+First LLM call: turn raw resume text into a validated CandidateProfile.
 
-This file shows Claude's tool use pattern for structured output:
-1. Define a "tool" whose input_schema is the JSON schema of our Pydantic model.
-2. Force Claude to call that tool via `tool_choice`.
-3. Pull the tool_use block out of the response and validate with Pydantic.
+This module establishes the tool-use + Pydantic pattern that scorer.py and
+critique.py both follow. Read this file first and the other two will make
+sense quickly — they are variations on the same three beats:
 
-The exact same pattern appears in scorer.py and critique.py. Once you
-recognise it here, the others read the same way.
+    1. Build a tool whose `input_schema` is a Pydantic model's JSON schema.
+       Claude treats that schema as the contract for the tool's arguments.
+    2. Force Claude to call exactly that tool via `tool_choice`. This turns
+       a free-form chat call into a structured-output call: the response is
+       guaranteed to contain a tool_use block with JSON that fits the schema.
+    3. Pull the tool_use block out of `response.content` and hand its
+       `input` dict to `Model.model_validate(...)`. Pydantic raises if the
+       LLM returned anything malformed, so the rest of the pipeline can
+       trust the object it gets back.
+
+Prompts live in src/prompts.py, never inlined here.
 """
 
 from anthropic import Anthropic
@@ -24,13 +32,14 @@ def extract_candidate(
     resume_text: str,
     model: str = DEFAULT_MODEL,
 ) -> CandidateProfile:
-    """Extract a structured candidate profile from raw resume text."""
+    """Extract a structured CandidateProfile from raw resume text."""
 
-    # The tool definition. input_schema is the JSON Schema of our Pydantic
-    # model, so Claude knows exactly which fields to produce.
+    # The tool's input_schema IS the Pydantic schema. Claude will fill in
+    # arguments that conform to it, which is how we get structured output
+    # without parsing free text.
     tool = {
         "name": EXTRACTION_TOOL_NAME,
-        "description": "Record a structured summary of the candidate described in the resume.",
+        "description": "Record structured information extracted from the resume.",
         "input_schema": CandidateProfile.model_json_schema(),
     }
 
@@ -39,20 +48,11 @@ def extract_candidate(
         max_tokens=4096,
         system=EXTRACTION_SYSTEM_PROMPT,
         tools=[tool],
-        # Force Claude to call our tool — no free-form text answer allowed.
+        # Forcing this exact tool removes the "should I call a tool?" branch.
+        # The response is guaranteed to contain a tool_use block for it.
         tool_choice={"type": "tool", "name": EXTRACTION_TOOL_NAME},
         messages=[{"role": "user", "content": resume_text}],
     )
 
-    # The response is a list of content blocks. With forced tool_choice,
-    # we expect exactly one block of type "tool_use".
-    # Find the tool_use block in the response
-    tool_use = None
-    for block in response.content:
-        if block.type == "tool_use":
-            tool_use = block
-            break
-
-    # Pydantic validates Claude's JSON matches our schema and turns it into
-    # a typed Python object.
+    tool_use = next(block for block in response.content if block.type == "tool_use")
     return CandidateProfile.model_validate(tool_use.input)
