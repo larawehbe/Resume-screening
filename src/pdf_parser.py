@@ -17,8 +17,12 @@ def parse_pdf(path: str) -> str:
     Raises an exception if the PDF can't be read or contains no text —
     the caller catches it and reports the resume as failed.
     """
+    pages = []
     with pdfplumber.open(path) as pdf:
-        pages = [page.extract_text() or "" for page in pdf.pages]
+        for page in pdf.pages:
+            if not page.extract_text():
+                raise ValueError("PDF page contains no text.")
+            pages.append(page.extract_text() or "")
 
     text = "\n\n".join(p for p in pages if p.strip())
     text = _normalise_whitespace(text)

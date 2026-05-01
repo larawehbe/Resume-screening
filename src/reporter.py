@@ -1,94 +1,107 @@
 """
-Results -> JSON file + readable markdown report.
+Final stage of the pipeline: take the in-memory results and write them to
+disk as machine-readable JSON and a human-readable markdown report.
 
-Pure functions: no I/O beyond writing the two files, no async, no API calls.
-Easy to unit-test with hand-built ScoredCandidate lists.
+No LLM calls here — this is a pure transform from Pydantic models to text.
+That's why test_reporter.py can run in milliseconds with no API key.
+
+Two outputs:
+  - results.json: {"candidates": [...sorted by overall_fit desc...],
+                   "errors":     [...resumes that failed at any stage...]}
+  - report.md:    a ranked table plus per-candidate breakdowns and gaps.
 """
 
 import json
+from pathlib import Path
 
 from src.models import ProcessingError, ScoredCandidate
 
 Result = ScoredCandidate | ProcessingError
 
 
-def write_json(results: list[Result], path: str) -> None:
-    ranked, errors = _split_and_sort(results)
+def _split(results: list[Result]) -> tuple[list[ScoredCandidate], list[ProcessingError]]:
+    candidates = [r for r in results if isinstance(r, ScoredCandidate)]
+    errors = [r for r in results if isinstance(r, ProcessingError)]
+    candidates.sort(key=lambda c: c.overall_fit.score, reverse=True)
+    return candidates, errors
+
+
+def write_json(results: list[Result], path: str | Path) -> None:
+    """Write {candidates, errors} to a JSON file. Candidates sorted by overall_fit desc."""
+
+    candidates, errors = _split(results)
     payload = {
-        "candidates": [c.model_dump() for c in ranked],
+        "candidates": [c.model_dump() for c in candidates],
         "errors": [e.model_dump() for e in errors],
     }
-    with open(path, "w") as f:
-        f.write(json.dumps(payload, indent=2))
+    Path(path).write_text(json.dumps(payload, indent=2))
 
 
-def write_markdown(results: list[Result], path: str, jd_path: str) -> None:
-    ranked, errors = _split_and_sort(results)
+def write_markdown(
+    results: list[Result],
+    path: str | Path,
+    jd_path: str | Path,
+) -> None:
+    """Write a markdown report: ranked table + per-candidate breakdowns + errors."""
+
+    candidates, errors = _split(results)
+
     lines: list[str] = []
-
-    lines.append(f"# Resume Match Report")
+    lines.append("# Resume Match Report")
     lines.append("")
-    lines.append(f"_Job description: `{jd_path}`_")
+    lines.append(f"Job description: `{jd_path}`")
+    lines.append(f"Candidates scored: {len(candidates)}  ·  Failed: {len(errors)}")
     lines.append("")
 
     lines.append("## Ranked candidates")
     lines.append("")
-    if ranked:
-        lines.append("| Rank | Candidate | Overall | Skills | Experience | Role relevance |")
-        lines.append("|------|-----------|---------|--------|------------|----------------|")
-        for i, c in enumerate(ranked, 1):
+    if candidates:
+        lines.append("| Rank | Name | Overall | Skills | Experience | Role | Source |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for i, c in enumerate(candidates, start=1):
             lines.append(
-                f"| {i} | {c.profile.name} | {c.overall_fit.score} | "
-                f"{c.skills_match.score} | {c.experience_match.score} | "
-                f"{c.role_relevance.score} |"
+                f"| {i} "
+                f"| {c.profile.name} "
+                f"| {c.overall_fit.score} "
+                f"| {c.skills_match.score} "
+                f"| {c.experience_match.score} "
+                f"| {c.role_relevance.score} "
+                f"| {c.source_file} |"
             )
     else:
-        lines.append("_No candidates were scored._")
+        lines.append("_No candidates scored._")
     lines.append("")
 
-    for c in ranked:
-        lines.extend(_render_candidate_section(c))
+    for c in candidates:
+        lines.append(f"### {c.profile.name} — {c.overall_fit.score}")
+        lines.append("")
+        lines.append(f"_Source: `{c.source_file}` · {c.profile.years_experience} yrs experience_")
+        lines.append("")
+        lines.append(c.reasoning)
+        lines.append("")
+        lines.append("**Score breakdown**")
+        lines.append("")
+        lines.append(f"- Skills ({c.skills_match.score}): {c.skills_match.reasoning}")
+        lines.append(f"- Experience ({c.experience_match.score}): {c.experience_match.reasoning}")
+        lines.append(f"- Role relevance ({c.role_relevance.score}): {c.role_relevance.reasoning}")
+        lines.append(f"- Overall fit ({c.overall_fit.score}): {c.overall_fit.reasoning}")
+        lines.append("")
+        if c.gaps:
+            lines.append("**Gaps**")
+            lines.append("")
+            for gap in c.gaps:
+                lines.append(f"- _{gap.category}_ — {gap.detail}")
+            lines.append("")
 
     if errors:
         lines.append("## Could not process")
         lines.append("")
+        lines.append("| Source | Stage | Message |")
+        lines.append("| --- | --- | --- |")
         for e in errors:
-            lines.append(f"- **{e.source_file}** (failed at `{e.stage}`): {e.message}")
+            # Replace pipes in the message so they don't break the table layout.
+            msg = e.message.replace("|", "\\|").replace("\n", " ")
+            lines.append(f"| {e.source_file} | {e.stage} | {msg} |")
         lines.append("")
 
-    with open(path, "w") as f:
-        f.write("\n".join(lines))
-
-
-def _split_and_sort(
-    results: list[Result],
-) -> tuple[list[ScoredCandidate], list[ProcessingError]]:
-    ranked = sorted(
-        (r for r in results if isinstance(r, ScoredCandidate)),
-        key=lambda c: c.overall_fit.score,
-        reverse=True,
-    )
-    errors = [r for r in results if isinstance(r, ProcessingError)]
-    return ranked, errors
-
-
-def _render_candidate_section(c: ScoredCandidate) -> list[str]:
-    lines: list[str] = []
-    lines.append(f"## {c.profile.name}  — {c.overall_fit.score}/100")
-    lines.append("")
-    lines.append(f"_Source: `{c.source_file}` · {c.profile.years_experience:.1f} years experience_")
-    lines.append("")
-    lines.append(c.reasoning)
-    lines.append("")
-    lines.append("### Scores")
-    lines.append(f"- **Skills match** ({c.skills_match.score}): {c.skills_match.reasoning}")
-    lines.append(f"- **Experience match** ({c.experience_match.score}): {c.experience_match.reasoning}")
-    lines.append(f"- **Role relevance** ({c.role_relevance.score}): {c.role_relevance.reasoning}")
-    lines.append(f"- **Overall fit** ({c.overall_fit.score}): {c.overall_fit.reasoning}")
-    lines.append("")
-    if c.gaps:
-        lines.append("### Gaps")
-        for gap in c.gaps:
-            lines.append(f"- _{gap.category}_: {gap.detail}")
-        lines.append("")
-    return lines
+    Path(path).write_text("\n".join(lines))

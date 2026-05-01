@@ -187,3 +187,15 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+"""
+
+
+main.py -> args (jd, resumes, output, model, self critique ) -> run -
+for each pdfs:
+1. parse_pdf -> text
+2. extract_candidate (LLM call #1) -> CandidateProfile
+3. score_candidate (LLM call #2) -> ScoredCandidate
+4. optional critique_and_maybe_revise (LLM call #3) -> maybe revised
+
+"""

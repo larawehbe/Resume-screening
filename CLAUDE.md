@@ -18,6 +18,9 @@ uv run python scripts/generate_sample_resumes.py
 # Run the pipeline
 python main.py --jd sample_data/sample_jd.txt --resumes sample_data/resumes/
 
+# Override output directory (default ./output) or model (default DEFAULT_MODEL)
+python main.py --jd ... --resumes ... --output out/ --model claude-sonnet-4-6
+
 # Run with self-critique (adds one extra LLM call per resume)
 python main.py --jd sample_data/sample_jd.txt --resumes sample_data/resumes/ --self-critique
 
@@ -46,6 +49,8 @@ Requires `ANTHROPIC_API_KEY` in a `.env` file (loaded via `python-dotenv`). See 
 - `main.py` — CLI that loops over resume PDFs sequentially
 - `app.py` — Streamlit web UI with file upload
 
+Both entry points define their own `process_one()` that wires the same parse → extract → score (→ critique) pipeline. They are **not** sharing a helper — if you change the pipeline shape, update both files.
+
 **Pipeline stages (each in its own module under `src/`):**
 1. `pdf_parser.py` — pdfplumber text extraction, no LLM
 2. `extractor.py` — resume text -> `CandidateProfile` (LLM call #1, tool: `record_candidate`)
@@ -61,7 +66,8 @@ Requires `ANTHROPIC_API_KEY` in a `.env` file (loaded via `python-dotenv`). See 
 
 ## Design conventions
 
-- Default model is `claude-sonnet-4-6`, set in `src/extractor.py` as `DEFAULT_MODEL`.
-- Errors in individual resumes produce a `ProcessingError` instead of crashing the batch.
-- `scorer.py` also exposes `score_candidate_ensemble()` which runs N scoring calls and returns median scores per dimension.
+- Default model is `claude-sonnet-4-6`, set in `src/extractor.py` as `DEFAULT_MODEL`. `scorer.py` and `critique.py` redefine the same constant locally — keep them in sync.
+- Errors in individual resumes produce a `ProcessingError` (`stage` is one of `parse`/`extract`/`score`) instead of crashing the batch. A failure inside the optional critique pass does **not** produce a `ProcessingError`; it logs and falls back to the pre-critique scores.
+- `scorer.py` also exposes `score_candidate_ensemble()` which runs N scoring calls and returns median scores per dimension. Reasoning text is taken from the first run only — don't try to merge text across runs.
 - Evals test score ranges (e.g., 80-100 for strong match) because LLM output varies between calls. Add new eval cases by appending to `ALL_CASES` in `tests/evals/cases.py`.
+- Per `CONTRIBUTING.MD`, prompts are treated as the teaching artifact: any prompt change should be visible in the PR description (or saved under `prompts/`), and new conventions should be reflected back into this file.
